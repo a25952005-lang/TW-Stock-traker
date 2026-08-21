@@ -17,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from goodinfo_service import analyze_stock, GoodinfoFetchError
+from finmind_service import analyze_stock, GoodinfoFetchError
 import market_service
 import calendar_service
 
@@ -26,7 +26,7 @@ DATA_DIR = APP_DIR / "data"
 DATA_DIR.mkdir(exist_ok=True)
 WATCHLIST_FILE = DATA_DIR / "watchlist.json"
 CACHE_FILE = DATA_DIR / "cache.json"
-CACHE_TTL_SECONDS = 12 * 60 * 60  # 12 小時內重複查詢直接吃快取，減少對 Goodinfo 的請求
+CACHE_TTL_SECONDS = 12 * 60 * 60  # 12 小時內重複查詢直接吃快取，減少對 FinMind API 的請求
 
 app = FastAPI(title="台灣股票投資儀表板 API")
 
@@ -98,7 +98,7 @@ def get_stock(code: str, force_refresh: bool = False):
     except GoodinfoFetchError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"抓取 Goodinfo 資料時發生錯誤：{e}")
+        raise HTTPException(status_code=502, detail=f"抓取財報資料時發生錯誤：{e}")
     data["from_cache"] = False
     set_cached_analysis(code, data)
     return data
