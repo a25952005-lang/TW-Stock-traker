@@ -10,6 +10,14 @@ from bs4 import BeautifulSoup
 
 TZ_OFFSET = -480  # 台灣 UTC+8
 
+DEFAULT_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Referer": "https://goodinfo.tw/tw/index.asp",
+}
+
 
 class GoodinfoFetchError(Exception):
     pass
@@ -25,30 +33,81 @@ def _get_client_key():
     return client_key, days_adjusted
 
 
-def _fetch_report(stock_id: str, rpt_cat: str, days_adjusted: float, client_key: str) -> BeautifulSoup:
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Referer": "https://goodinfo.tw/",
-    }
-    cookies = {"CLIENT_KEY": client_key}
+def _get_client_id(outbound_ip: str = "127.0.0.1") -> str:
+    """
+    模擬 Goodinfo 另一個常見的驗證 cookie CLIENT_ID，
+    格式實際觀察到的樣子是「yyyyMMddHHmmssSSS_伺服器對外IP」。
+    """
+    now = time.strftime("%Y%m%d%H%M%S") + f"{int(time.time() * 1000) % 1000:03d}"
+    return f"{now}_{outbound_ip}"
+
+
+def _get_outbound_ip() -> str:
+    try:
+        r = requests.get("https://api.ipify.org", timeout=5)
+        if r.status_code == 200 and r.text.strip():
+            return r.text.strip()
+    except Exception:
+        pass
+    return "127.0.0.1"
+
+
+def _make_session(stock_id: str) -> requests.Session:
+    """
+    建立一個模擬真人瀏覽的 session：
+    先訪問個股頁面拿一輪正常 cookie，再補上 CLIENT_KEY / CLIENT_ID，
+    比單純只帶一個 CLIENT_KEY 硬打報表頁，比較不容易被防爬機制擋下來。
+    """
+    session = requests.Session()
+    session.headers.update(DEFAULT_HEADERS)
+    try:
+        session.get(
+            f"https://goodinfo.tw/tw/StockDetail.asp?STOCK_ID={stock_id}",
+            timeout=15,
+        )
+    except Exception:
+        pass  # 拿不到也沒關係，照樣往下試
+
+    client_key, days_adjusted = _get_client_key()
+    session.cookies.set("CLIENT_KEY", client_key, domain="goodinfo.tw")
+    session.cookies.set("CLIENT_ID", _get_client_id(_get_outbound_ip()), domain="goodinfo.tw")
+    session.cookies.set("IS_TOUCH_DEVICE", "F", domain="goodinfo.tw")
+    session.cookies.set("SCREEN_SIZE", "WIDTH=1920&HEIGHT=1080", domain="goodinfo.tw")
+    return session, days_adjusted
+
+
+def _fetch_report(session: requests.Session, stock_id: str, rpt_cat: str, days_adjusted: float) -> BeautifulSoup:
     url = (
         f"https://goodinfo.tw/tw/StockFinDetail.asp?RPT_CAT={rpt_cat}"
         f"&STOCK_ID={stock_id}&REINIT={days_adjusted:.10f}"
     )
-    r = requests.get(url, headers=headers, cookies=cookies, timeout=15)
+    r = session.get(url, timeout=15)
     r.encoding = "utf-8"
     if r.status_code != 200:
-        raise GoodinfoFetchError(f"Goodinfo 回應狀態碼 {r.status_code}（股票代碼 {stock_id}）")
+        raise GoodinfoFetchError(
+            f"Goodinfo 回應狀態碼 {r.status_code}（股票代碼 {stock_id}）。"
+            f"這通常是 Goodinfo 的防爬蟲機制擋下伺服器所在地區的連線，"
+            f"不是程式邏輯錯誤。"
+        )
     return BeautifulSoup(r.text, "html.parser")
 
 
 def _parse_table(soup: BeautifulSoup):
-    """解析 Goodinfo 財報表格，回傳 ({欄位名: {年度: 數值}}, [年度...])"""
-    tables = soup.find_all("table")
-    if len(tables) < 7:
-        return {}, []
+    """
+    解析 Goodinfo 財報表格，回傳 ({欄位名: {年度: 數值}}, [年度...])。
+    優先用 id="txtFinDetailData" 這個容器去定位表格（比較不受版面異動影響），
+    找不到才退回「第 7 個 table」的猜測方式。
+    """
+    container = soup.select_one("#txtFinDetailData")
+    if container is not None:
+        inner_tables = container.find_all("table")
+        t = inner_tables[-1] if inner_tables else container
+    else:
+        tables = soup.find_all("table")
+        if len(tables) < 7:
+            return {}, []
+        t = tables[6]
 
-    t = tables[6]
     rows = t.find_all("tr")
     years = []
     data = {}
@@ -255,20 +314,20 @@ def analyze_stock(stock_id: str) -> dict:
     if not (stock_id.isdigit() and 4 <= len(stock_id) <= 6):
         raise GoodinfoFetchError("股票代碼格式錯誤，請輸入 4-6 碼數字")
 
-    client_key, days_adjusted = _get_client_key()
+    session, days_adjusted = _make_session(stock_id)
 
-    is_soup = _fetch_report(stock_id, "IS_YEAR", days_adjusted, client_key)
+    is_soup = _fetch_report(session, stock_id, "IS_YEAR", days_adjusted)
     is_data, years = _parse_table(is_soup)
     if not years:
         raise GoodinfoFetchError(f"查無股票代碼 {stock_id} 的財報資料，請確認代碼是否正確")
     company_name = _company_name(is_soup, stock_id)
 
     time.sleep(1)
-    bs_soup = _fetch_report(stock_id, "BS_YEAR", days_adjusted, client_key)
+    bs_soup = _fetch_report(session, stock_id, "BS_YEAR", days_adjusted)
     bs_data, _ = _parse_table(bs_soup)
 
     time.sleep(1)
-    cf_soup = _fetch_report(stock_id, "CF_YEAR", days_adjusted, client_key)
+    cf_soup = _fetch_report(session, stock_id, "CF_YEAR", days_adjusted)
     cf_data, _ = _parse_table(cf_soup)
 
     years3 = years[:3]
