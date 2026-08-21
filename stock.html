@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>個股財務分析</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.0/dist/chart.umd.min.js"></script>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="header">
+  <div>
+    <a class="back-link" href="index.html">← 回總覽</a>
+    <h1 id="titleText">載入中…</h1>
+    <div class="subtitle" id="subtitleText"></div>
+  </div>
+  <div style="display:flex; flex-direction:column; align-items:flex-end; gap:8px;">
+    <div class="nav">
+      <a href="index.html">🏠 總覽</a>
+      <a href="calendar.html">🗓️ 市場行事曆</a>
+    </div>
+    <div style="display:flex; gap:10px; align-items:center;">
+      <button class="btn ghost" id="refreshBtn">🔄 重新抓取</button>
+      <div class="badge" id="sourceBadge">Goodinfo.tw</div>
+    </div>
+  </div>
+</div>
+
+<div id="mainContent">
+  <div class="loading">正在抓取財報資料，第一次抓取需要幾秒鐘，請稍候…</div>
+</div>
+
+<script src="common.js"></script>
+<script>
+const params = new URLSearchParams(window.location.search);
+const code = params.get("code");
+let chartInstances = [];
+
+function destroyCharts() {
+  chartInstances.forEach(c => c.destroy());
+  chartInstances = [];
+}
+
+function mkChart(ctx, config) {
+  const c = new Chart(ctx, config);
+  chartInstances.push(c);
+  return c;
+}
+
+function kpiCard(label, value, changeVal, colorClass = "") {
+  const cls = changeVal === undefined ? "" : `${yoyClass(changeVal)}`;
+  const changeHtml = changeVal === undefined
+    ? ""
+    : `<div class="kpi-change ${cls}">${yoyArrow(changeVal)} ${fmtPct(changeVal)} YoY</div>`;
+  return `
+    <div class="kpi-card ${colorClass}">
+      <div class="kpi-label">${label}</div>
+      <div class="kpi-value">${value}</div>
+      ${changeHtml}
+    </div>`;
+}
+
+function insightBox(title, points) {
+  return `
+    <div class="insight-box">
+      <h3>💡 ${title}</h3>
+      <ul>${points.map(p => `<li>${p}</li>`).join("")}</ul>
+    </div>`;
+}
+
+function warningBox(warnings) {
+  if (!warnings || warnings.length === 0) return "";
+  return `
+    <div class="warning-box">
+      <h3>⚠️ 資料合理性檢查提醒</h3>
+      <ul>${warnings.map(w => `<li>[${w.field}] ${w.msg}</li>`).join("")}</ul>
+    </div>`;
+}
+
+async function load(forceRefresh = false) {
+  destroyCharts();
+  document.getElementById("mainContent").innerHTML = `<div class="loading">${forceRefresh ? "重新抓取中" : "載入中"}…</div>`;
+  try {
+    const data = await apiGet(`/api/stock/${code}${forceRefresh ? "?force_refresh=true" : ""}`);
+    render(data);
+  } catch (err) {
+    document.getElementById("mainContent").innerHTML = `<div class="loading">載入失敗：${err.message}</div>`;
+  }
+}
+
+function render(data) {
+  const years = data.years; // 新到舊
+  const yearsAsc = [...years].reverse(); // 舊到新，畫圖用
+  const m = data.metrics;
+  const latest = years[0];
+  const L = m[latest] || {};
+
+  document.getElementById("titleText").textContent = `${data.company_name} (${data.stock_id})`;
+  document.getElementById("subtitleText").textContent =
+    `分析期間：${yearsAsc[0]} – ${yearsAsc[yearsAsc.length - 1]}｜金額單位：億元 (NTD)｜抓取時間：${new Date(data.metadata.fetched_at).toLocaleString("zh-TW")}${data.from_cache ? "（快取資料）" : ""}`;
+  document.getElementById("sourceBadge").innerHTML =
+    `<a href="${data.metadata.mops_url}" target="_blank" style="color:white;">📋 MOPS 官方申報</a>`;
+
+  const get = (field, yr) => (m[yr] ? m[yr][field] : null);
+  const series = (field) => yearsAsc.map(yr => get(field, yr));
+
+  const html = `
+    <div class="tabs">
+      <div class="tab active" data-tab="ops">📊 經營分析</div>
+      <div class="tab" data-tab="profit">💰 獲利分析</div>
+      <div class="tab" data-tab="finance">🏦 財務健全度</div>
+    </div>
+
+    <div class="container" style="padding-top:0;">
+    ${warningBox(data.verification.sanity)}
+
+    <div id="ops" class="tab-content active">
+      <div class="kpi-row">
+        ${kpiCard("營業收入(億)", fmtNum(L.revenue, 0), L.revenue_yoy)}
+        ${kpiCard("毛利率", fmtPct(L.gross_margin), undefined, "green")}
+        ${kpiCard("營業利益率", fmtPct(L.op_margin), undefined, "purple")}
+        ${kpiCard("研發費用率", fmtPct(L.rd_ratio), undefined, "orange")}
+        ${kpiCard("總費用率", fmtPct(L.total_opex_ratio))}
+      </div>
+      ${insightBox("經營分析重點", [
+        `${latest} 年營收 ${fmtNum(L.revenue, 0)} 億元，年增率 ${fmtPct(L.revenue_yoy)}`,
+        `毛利率 ${fmtPct(L.gross_margin)}，營業利益率 ${fmtPct(L.op_margin)}`,
+        `推銷 + 管理 + 研發費用合計占營收 ${fmtPct(L.total_opex_ratio)}`,
+      ])}
+      <div class="charts-grid">
+        <div class="chart-card"><div class="chart-title">營收趨勢與年增率</div><div class="chart-container"><canvas id="chartRevenue"></canvas></div></div>
+        <div class="chart-card"><div class="chart-title">毛利率 / 營業利益率趨勢</div><div class="chart-container"><canvas id="chartMargins"></canvas></div></div>
+        <div class="chart-card"><div class="chart-title">費用結構（推銷 / 管理 / 研發）</div><div class="chart-container"><canvas id="chartOpex"></canvas></div></div>
+        <div class="chart-card"><div class="chart-title">總費用率趨勢</div><div class="chart-container"><canvas id="chartOpexRatio"></canvas></div></div>
+      </div>
+      <div class="table-card">
+        <table class="data-table">
+          <thead><tr><th style="text-align:left;">項目</th>${yearsAsc.map(y => `<th>${y}</th>`).join("")}</tr></thead>
+          <tbody>
+            <tr><td>營業收入(億)</td>${yearsAsc.map(y => `<td>${fmtNum(get("revenue", y), 0)}</td>`).join("")}</tr>
+            <tr><td>營業毛利(億)</td>${yearsAsc.map(y => `<td>${fmtNum(get("gross_profit", y), 0)}</td>`).join("")}</tr>
+            <tr><td>毛利率</td>${yearsAsc.map(y => `<td>${fmtPct(get("gross_margin", y))}</td>`).join("")}</tr>
+            <tr><td>營業利益(億)</td>${yearsAsc.map(y => `<td>${fmtNum(get("op_income", y), 0)}</td>`).join("")}</tr>
+            <tr><td>營業利益率</td>${yearsAsc.map(y => `<td>${fmtPct(get("op_margin", y))}</td>`).join("")}</tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div id="profit" class="tab-content">
+      <div class="kpi-row">
+        ${kpiCard("稅後淨利(億)", fmtNum(L.net_income, 0), L.net_income_yoy)}
+        ${kpiCard("EPS(元)", fmtNum(L.eps, 2), L.eps_yoy, "purple")}
+        ${kpiCard("ROE", fmtPct(L.roe), undefined, "green")}
+        ${kpiCard("ROA", fmtPct(L.roa), undefined, "green")}
+        ${kpiCard("淨利率", fmtPct(L.net_margin))}
+      </div>
+      ${insightBox("獲利分析重點", [
+        `${latest} 年稅後淨利 ${fmtNum(L.net_income, 0)} 億元，年增率 ${fmtPct(L.net_income_yoy)}`,
+        `EPS ${fmtNum(L.eps, 2)} 元，年增率 ${fmtPct(L.eps_yoy)}`,
+        `ROE ${fmtPct(L.roe)}，ROA ${fmtPct(L.roa)}`,
+      ])}
+      <div class="charts-grid">
+        <div class="chart-card"><div class="chart-title">稅後淨利與 EPS 趨勢</div><div class="chart-container"><canvas id="chartProfit"></canvas></div></div>
+        <div class="chart-card"><div class="chart-title">ROE / ROA 趨勢</div><div class="chart-container"><canvas id="chartRoe"></canvas></div></div>
+        <div class="chart-card"><div class="chart-title">三層利潤率比較（毛利／營業／淨利）</div><div class="chart-container"><canvas id="chartMarginCompare"></canvas></div></div>
+        <div class="chart-card"><div class="chart-title">現金股利發放趨勢(億)</div><div class="chart-container"><canvas id="chartDividend"></canvas></div></div>
+      </div>
+      <div class="table-card">
+        <table class="data-table">
+          <thead><tr><th style="text-align:left;">項目</th>${yearsAsc.map(y => `<th>${y}</th>`).join("")}</tr></thead>
+          <tbody>
+            <tr><td>稅後淨利(億)</td>${yearsAsc.map(y => `<td>${fmtNum(get("net_income", y), 0)}</td>`).join("")}</tr>
+            <tr><td>EPS(元)</td>${yearsAsc.map(y => `<td>${fmtNum(get("eps", y), 2)}</td>`).join("")}</tr>
+            <tr><td>ROE</td>${yearsAsc.map(y => `<td>${fmtPct(get("roe", y))}</td>`).join("")}</tr>
+            <tr><td>ROA</td>${yearsAsc.map(y => `<td>${fmtPct(get("roa", y))}</td>`).join("")}</tr>
+            <tr><td>現金股利(億)</td>${yearsAsc.map(y => `<td>${fmtNum(get("cash_dividend", y), 0)}</td>`).join("")}</tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div id="finance" class="tab-content">
+      <div class="kpi-row">
+        ${kpiCard("現金部位(億)", fmtNum(L.cash, 0), undefined, "green")}
+        ${kpiCard("流動比率", fmtPct(L.current_ratio, 0))}
+        ${kpiCard("負債比率", fmtPct(L.debt_ratio, 0), undefined, L.debt_ratio > 60 ? "red" : "")}
+        ${kpiCard("營業現金流(億)", fmtNum(L.operating_cf, 0), undefined, "purple")}
+        ${kpiCard("自由現金流(億)", fmtNum(L.fcf, 0))}
+      </div>
+      ${insightBox("財務健全度重點", [
+        `現金部位 ${fmtNum(L.cash, 0)} 億元，流動比率 ${fmtPct(L.current_ratio, 0)}`,
+        `負債比率 ${fmtPct(L.debt_ratio, 0)}`,
+        `營業現金流 ${fmtNum(L.operating_cf, 0)} 億元，自由現金流 ${fmtNum(L.fcf, 0)} 億元`,
+      ])}
+      <div class="charts-grid">
+        <div class="chart-card"><div class="chart-title">現金部位趨勢(億)</div><div class="chart-container"><canvas id="chartCash"></canvas></div></div>
+        <div class="chart-card"><div class="chart-title">流動比率 / 負債比率趨勢</div><div class="chart-container"><canvas id="chartRatios"></canvas></div></div>
+        <div class="chart-card"><div class="chart-title">營業現金流 vs 自由現金流(億)</div><div class="chart-container"><canvas id="chartCF"></canvas></div></div>
+        <div class="chart-card"><div class="chart-title">現金股利 vs 自由現金流(億)</div><div class="chart-container"><canvas id="chartDivFcf"></canvas></div></div>
+      </div>
+      <div class="tables-row">
+        <div class="table-card">
+          <table class="data-table">
+            <thead><tr><th style="text-align:left;">資產負債</th>${yearsAsc.map(y => `<th>${y}</th>`).join("")}</tr></thead>
+            <tbody>
+              <tr><td>現金(億)</td>${yearsAsc.map(y => `<td>${fmtNum(get("cash", y), 0)}</td>`).join("")}</tr>
+              <tr><td>流動資產(億)</td>${yearsAsc.map(y => `<td>${fmtNum(get("current_assets", y), 0)}</td>`).join("")}</tr>
+              <tr><td>流動負債(億)</td>${yearsAsc.map(y => `<td>${fmtNum(get("current_liabilities", y), 0)}</td>`).join("")}</tr>
+              <tr><td>總資產(億)</td>${yearsAsc.map(y => `<td>${fmtNum(get("total_assets", y), 0)}</td>`).join("")}</tr>
+              <tr><td>總負債(億)</td>${yearsAsc.map(y => `<td>${fmtNum(get("total_liabilities", y), 0)}</td>`).join("")}</tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="table-card">
+          <table class="data-table">
+            <thead><tr><th style="text-align:left;">現金流量</th>${yearsAsc.map(y => `<th>${y}</th>`).join("")}</tr></thead>
+            <tbody>
+              <tr><td>營業CF(億)</td>${yearsAsc.map(y => `<td>${fmtNum(get("operating_cf", y), 0)}</td>`).join("")}</tr>
+              <tr><td>投資CF(億)</td>${yearsAsc.map(y => `<td>${fmtNum(get("investing_cf", y), 0)}</td>`).join("")}</tr>
+              <tr><td>融資CF(億)</td>${yearsAsc.map(y => `<td>${fmtNum(get("financing_cf", y), 0)}</td>`).join("")}</tr>
+              <tr><td>自由現金流(億)</td>${yearsAsc.map(y => `<td>${fmtNum(get("fcf", y), 0)}</td>`).join("")}</tr>
+              <tr><td>現金股利(億)</td>${yearsAsc.map(y => `<td>${fmtNum(get("cash_dividend", y), 0)}</td>`).join("")}</tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    <div class="footer-note">僅供財務學習與研究參考，不構成投資建議。</div>
+    </div>
+  `;
+
+  document.getElementById("mainContent").innerHTML = html;
+
+  document.querySelectorAll(".tab").forEach(tab => {
+    tab.addEventListener("click", () => {
+      document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
+      document.querySelectorAll(".tab-content").forEach(c => c.classList.remove("active"));
+      tab.classList.add("active");
+      document.getElementById(tab.dataset.tab).classList.add("active");
+    });
+  });
+
+  // ── 圖表 ──
+  const gridOpt = { grid: { color: "rgba(0,0,0,0.05)" } };
+
+  mkChart(document.getElementById("chartRevenue"), {
+    type: "bar",
+    data: {
+      labels: yearsAsc,
+      datasets: [
+        { label: "營收(億)", data: series("revenue"), backgroundColor: "rgba(49,130,206,0.5)", borderColor: "#3182ce", borderWidth: 2, yAxisID: "y" },
+        { label: "年增率(%)", data: series("revenue_yoy"), type: "line", borderColor: "#38a169", backgroundColor: "#38a169", pointRadius: 5, tension: 0.3, yAxisID: "y2" },
+      ],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      scales: { x: { grid: { display: false } }, y: gridOpt, y2: { position: "right", grid: { display: false }, ticks: { callback: v => v + "%" } } },
+    },
+  });
+
+  mkChart(document.getElementById("chartMargins"), {
+    type: "line",
+    data: {
+      labels: yearsAsc,
+      datasets: [
+        { label: "毛利率(%)", data: series("gross_margin"), borderColor: "#3182ce", backgroundColor: "rgba(49,130,206,0.1)", tension: 0.3, fill: true },
+        { label: "營業利益率(%)", data: series("op_margin"), borderColor: "#805ad5", backgroundColor: "rgba(128,90,213,0.1)", tension: 0.3, fill: true },
+      ],
+    },
+    options: { responsive: true, maintainAspectRatio: false, scales: { x: { grid: { display: false } }, y: { ...gridOpt, ticks: { callback: v => v + "%" } } } },
+  });
+
+  mkChart(document.getElementById("chartOpex"), {
+    type: "bar",
+    data: {
+      labels: yearsAsc,
+      datasets: [
+        { label: "推銷費用率(%)", data: series("sell_ratio"), backgroundColor: "#3182ce" },
+        { label: "管理費用率(%)", data: series("admin_ratio"), backgroundColor: "#dd6b20" },
+        { label: "研發費用率(%)", data: series("rd_ratio"), backgroundColor: "#805ad5" },
+      ],
+    },
+    options: { responsive: true, maintainAspectRatio: false, scales: { x: { stacked: true, grid: { display: false } }, y: { stacked: true, ...gridOpt, ticks: { callback: v => v + "%" } } } },
+  });
+
+  mkChart(document.getElementById("chartOpexRatio"), {
+    type: "line",
+    data: { labels: yearsAsc, datasets: [{ label: "總費用率(%)", data: series("total_opex_ratio"), borderColor: "#e53e3e", backgroundColor: "rgba(229,62,62,0.1)", tension: 0.3, fill: true }] },
+    options: { responsive: true, maintainAspectRatio: false, scales: { x: { grid: { display: false } }, y: { ...gridOpt, ticks: { callback: v => v + "%" } } } },
+  });
+
+  mkChart(document.getElementById("chartProfit"), {
+    type: "bar",
+    data: {
+      labels: yearsAsc,
+      datasets: [
+        { label: "稅後淨利(億)", data: series("net_income"), backgroundColor: "rgba(56,161,105,0.5)", borderColor: "#38a169", borderWidth: 2, yAxisID: "y" },
+        { label: "EPS(元)", data: series("eps"), type: "line", borderColor: "#dd6b20", backgroundColor: "#dd6b20", pointRadius: 5, tension: 0.3, yAxisID: "y2" },
+      ],
+    },
+    options: { responsive: true, maintainAspectRatio: false, scales: { x: { grid: { display: false } }, y: gridOpt, y2: { position: "right", grid: { display: false } } } },
+  });
+
+  mkChart(document.getElementById("chartRoe"), {
+    type: "line",
+    data: {
+      labels: yearsAsc,
+      datasets: [
+        { label: "ROE(%)", data: series("roe"), borderColor: "#38a169", backgroundColor: "rgba(56,161,105,0.1)", tension: 0.3, fill: true },
+        { label: "ROA(%)", data: series("roa"), borderColor: "#3182ce", backgroundColor: "rgba(49,130,206,0.1)", tension: 0.3, fill: true },
+      ],
+    },
+    options: { responsive: true, maintainAspectRatio: false, scales: { x: { grid: { display: false } }, y: { ...gridOpt, ticks: { callback: v => v + "%" } } } },
+  });
+
+  mkChart(document.getElementById("chartMarginCompare"), {
+    type: "line",
+    data: {
+      labels: yearsAsc,
+      datasets: [
+        { label: "毛利率(%)", data: series("gross_margin"), borderColor: "#3182ce", tension: 0.3 },
+        { label: "營業利益率(%)", data: series("op_margin"), borderColor: "#805ad5", tension: 0.3 },
+        { label: "淨利率(%)", data: series("net_margin"), borderColor: "#38a169", tension: 0.3 },
+      ],
+    },
+    options: { responsive: true, maintainAspectRatio: false, scales: { x: { grid: { display: false } }, y: { ...gridOpt, ticks: { callback: v => v + "%" } } } },
+  });
+
+  mkChart(document.getElementById("chartDividend"), {
+    type: "bar",
+    data: { labels: yearsAsc, datasets: [{ label: "現金股利(億)", data: series("cash_dividend"), backgroundColor: "#805ad5" }] },
+    options: { responsive: true, maintainAspectRatio: false, scales: { x: { grid: { display: false } }, y: gridOpt } },
+  });
+
+  mkChart(document.getElementById("chartCash"), {
+    type: "bar",
+    data: { labels: yearsAsc, datasets: [{ label: "現金部位(億)", data: series("cash"), backgroundColor: "rgba(56,161,105,0.5)", borderColor: "#38a169", borderWidth: 2 }] },
+    options: { responsive: true, maintainAspectRatio: false, scales: { x: { grid: { display: false } }, y: gridOpt } },
+  });
+
+  mkChart(document.getElementById("chartRatios"), {
+    type: "line",
+    data: {
+      labels: yearsAsc,
+      datasets: [
+        { label: "流動比率(%)", data: series("current_ratio"), borderColor: "#3182ce", tension: 0.3 },
+        { label: "負債比率(%)", data: series("debt_ratio"), borderColor: "#e53e3e", tension: 0.3 },
+      ],
+    },
+    options: { responsive: true, maintainAspectRatio: false, scales: { x: { grid: { display: false } }, y: { ...gridOpt, ticks: { callback: v => v + "%" } } } },
+  });
+
+  mkChart(document.getElementById("chartCF"), {
+    type: "bar",
+    data: {
+      labels: yearsAsc,
+      datasets: [
+        { label: "營業CF(億)", data: series("operating_cf"), backgroundColor: "#3182ce" },
+        { label: "自由現金流(億)", data: series("fcf"), backgroundColor: "#38a169" },
+      ],
+    },
+    options: { responsive: true, maintainAspectRatio: false, scales: { x: { grid: { display: false } }, y: gridOpt } },
+  });
+
+  mkChart(document.getElementById("chartDivFcf"), {
+    type: "bar",
+    data: {
+      labels: yearsAsc,
+      datasets: [
+        { label: "現金股利(億)", data: series("cash_dividend"), backgroundColor: "#805ad5" },
+        { label: "自由現金流(億)", data: series("fcf"), backgroundColor: "#38a169" },
+      ],
+    },
+    options: { responsive: true, maintainAspectRatio: false, scales: { x: { grid: { display: false } }, y: gridOpt } },
+  });
+}
+
+document.getElementById("refreshBtn").addEventListener("click", () => load(true));
+
+if (!code) {
+  document.getElementById("mainContent").innerHTML = `<div class="loading">網址缺少股票代碼參數</div>`;
+} else {
+  load(false);
+}
+</script>
+</body>
+</html>

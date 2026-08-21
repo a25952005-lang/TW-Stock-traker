@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>台灣股票投資儀表板</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="header">
+  <div>
+    <h1>📊 台灣股票投資儀表板</h1>
+    <div class="subtitle">資料來源：Goodinfo.tw / 證交所 OpenAPI｜即時財報分析 + 市場情緒 + 行事曆</div>
+  </div>
+  <div style="display:flex; flex-direction:column; align-items:flex-end; gap:8px;">
+    <div class="nav">
+      <a href="index.html" class="active">🏠 總覽</a>
+      <a href="calendar.html">🗓️ 市場行事曆</a>
+    </div>
+    <div class="badge" id="stockCount">0 檔追蹤中</div>
+  </div>
+</div>
+
+<div class="container">
+
+  <div class="section-title">📈 市場情緒總覽</div>
+  <div id="sentimentContent">
+    <div class="loading">載入市場資料中…</div>
+  </div>
+
+  <div class="section-title">⭐ 我的自選股</div>
+
+  <form class="add-form" id="addForm">
+    <input type="text" name="code" placeholder="股票代碼，例如 2330" maxlength="6" required>
+    <input type="text" name="note" placeholder="備註（選填）">
+    <button class="btn" type="submit">＋ 加入觀察清單</button>
+    <span class="toggle-link" id="advToggle">＋ 進階設定（分類 / 價格提醒）</span>
+    <span id="addError" style="color:#e53e3e; font-size:0.85rem;"></span>
+  </form>
+  <div class="add-form-advanced" id="advPanel" style="display:none;">
+    <select name="category" form="addForm" id="categorySelect">
+      <option>核心持股</option>
+      <option selected>觀察中</option>
+      <option>投機／短線</option>
+      <option>定期定額</option>
+    </select>
+    <input type="number" name="alert_below" form="addForm" placeholder="跌破提醒價" step="0.01">
+    <input type="number" name="alert_above" form="addForm" placeholder="漲過提醒價" step="0.01">
+  </div>
+
+  <div class="filter-chips" id="filterChips"></div>
+
+  <div id="content">
+    <div class="loading">載入中…</div>
+  </div>
+
+  <div class="footer-note">
+    僅供財務學習與研究參考，不構成投資建議。資料來源為 Goodinfo.tw 與台灣證券交易所 OpenAPI，正式數字請以公開資訊觀測站 (MOPS) 為準。
+  </div>
+</div>
+
+<script src="common.js"></script>
+<script>
+const contentEl = document.getElementById("content");
+const countEl = document.getElementById("stockCount");
+const sentimentEl = document.getElementById("sentimentContent");
+let currentFilter = "全部";
+let allItems = [];
+
+document.getElementById("advToggle").addEventListener("click", () => {
+  const panel = document.getElementById("advPanel");
+  const shown = panel.style.display !== "none";
+  panel.style.display = shown ? "none" : "flex";
+  document.getElementById("advToggle").textContent = shown ? "＋ 進階設定（分類 / 價格提醒）" : "－ 收合進階設定";
+});
+
+// ── 市場情緒 ──
+async function loadSentiment() {
+  try {
+    const s = await apiGet("/api/market/sentiment");
+    const t = s.taiex || {};
+    const b = s.breadth || {};
+    const inst = s.institutional || {};
+
+    if (t.error && b.error && inst.error) {
+      sentimentEl.innerHTML = `<div class="empty-state" style="padding:24px;">市場資料暫時抓取失敗（可能是非交易時間或來源忙碌），稍後會自動重試。</div>`;
+      return;
+    }
+
+    const breadthTotal = (b.up || 0) + (b.down || 0) + (b.flat || 0) || 1;
+    const upPct = ((b.up || 0) / breadthTotal * 100).toFixed(1);
+    const downPct = ((b.down || 0) / breadthTotal * 100).toFixed(1);
+    const flatPct = (100 - upPct - downPct).toFixed(1);
+
+    sentimentEl.innerHTML = `
+      <div class="sentiment-grid">
+        <div class="sentiment-card">
+          <div class="s-label">加權指數 TAIEX</div>
+          <div class="s-value ${yoyClass(t.change)}">${fmtNum(t.taiex, 0)}</div>
+          <div class="s-sub ${yoyClass(t.change)}">${yoyArrow(t.change)} ${fmtNum(t.change, 0)} 點（${t.date || "—"}）</div>
+        </div>
+        <div class="sentiment-card">
+          <div class="s-label">成交金額(億)</div>
+          <div class="s-value">${fmtYiFromYuan(t.turnover_value, 0)}</div>
+        </div>
+        <div class="sentiment-card">
+          <div class="s-label">全市場漲跌家數</div>
+          <div class="s-value">${b.up ?? "—"} 漲 / ${b.down ?? "—"} 跌</div>
+          <div class="breadth-bar">
+            <div class="up-seg" style="width:${upPct}%"></div>
+            <div class="flat-seg" style="width:${flatPct}%"></div>
+            <div class="down-seg" style="width:${downPct}%"></div>
+          </div>
+        </div>
+        <div class="sentiment-card">
+          <div class="s-label">三大法人買賣超(億)</div>
+          <table class="flow-table">
+            <tr><td>外資</td><td class="${yoyClass(inst.foreign?.net)}">${fmtYiFromYuan(inst.foreign?.net)}</td></tr>
+            <tr><td>投信</td><td class="${yoyClass(inst.investment_trust?.net)}">${fmtYiFromYuan(inst.investment_trust?.net)}</td></tr>
+            <tr><td>自營商</td><td class="${yoyClass(inst.dealer?.net)}">${fmtYiFromYuan(inst.dealer?.net)}</td></tr>
+          </table>
+        </div>
+      </div>`;
+  } catch (err) {
+    sentimentEl.innerHTML = `<div class="empty-state" style="padding:24px;">市場資料載入失敗：${err.message}</div>`;
+  }
+}
+
+// ── 自選股 ──
+function renderChips() {
+  const cats = ["全部", ...new Set(allItems.map(i => i.category || "觀察中"))];
+  document.getElementById("filterChips").innerHTML = cats.map(c =>
+    `<div class="chip ${c === currentFilter ? "active" : ""}" data-chip="${c}">${c}</div>`
+  ).join("");
+  document.querySelectorAll("[data-chip]").forEach(chip => {
+    chip.addEventListener("click", () => {
+      currentFilter = chip.dataset.chip;
+      renderList();
+    });
+  });
+}
+
+function renderCard(item) {
+  if (item.error) {
+    return `
+      <div class="watch-card" data-code="${item.code}">
+        <button class="remove-btn" title="移除" data-remove="${item.code}">✕</button>
+        <span class="cat-badge">${item.category || "觀察中"}</span>
+        <div class="code">${item.code}</div>
+        <div class="name">${item.note || item.code}</div>
+        <div class="error-msg">⚠️ 抓取失敗：${item.error}</div>
+      </div>`;
+  }
+  let alertHtml = "";
+  if (item.alert_triggered === "below") {
+    alertHtml = `<div class="alert-badge hit-below">🔔 已跌破提醒價 ${fmtNum(item.alert_below, 2)}（現價 ${fmtNum(item.current_price, 2)}）</div>`;
+  } else if (item.alert_triggered === "above") {
+    alertHtml = `<div class="alert-badge hit-above">🔔 已漲過提醒價 ${fmtNum(item.alert_above, 2)}（現價 ${fmtNum(item.current_price, 2)}）</div>`;
+  } else if (item.alert_below !== null || item.alert_above !== null) {
+    const parts = [];
+    if (item.alert_below !== null && item.alert_below !== undefined) parts.push(`跌破 ${fmtNum(item.alert_below, 2)}`);
+    if (item.alert_above !== null && item.alert_above !== undefined) parts.push(`漲過 ${fmtNum(item.alert_above, 2)}`);
+    alertHtml = `<div class="alert-info">🔕 提醒設定：${parts.join(" / ")}${item.current_price ? `（現價 ${fmtNum(item.current_price, 2)}）` : ""}</div>`;
+  }
+
+  return `
+    <div class="watch-card" data-code="${item.code}">
+      <button class="remove-btn" title="移除" data-remove="${item.code}">✕</button>
+      <span class="cat-badge">${item.category || "觀察中"}</span>
+      <div class="code" style="margin-top:8px;">${item.code}${item.note ? " · " + item.note : ""}</div>
+      <div class="name">${item.name}</div>
+      <div class="metrics-row">
+        <div>
+          <div class="metric-label">${item.latest_year || "—"} 營收(億)</div>
+          <div class="metric-value">${fmtNum(item.revenue, 0)}</div>
+          <div class="kpi-change ${yoyClass(item.revenue_yoy)}">${yoyArrow(item.revenue_yoy)} ${fmtPct(item.revenue_yoy)}</div>
+        </div>
+        <div>
+          <div class="metric-label">EPS(元)</div>
+          <div class="metric-value">${fmtNum(item.eps, 2)}</div>
+          <div class="kpi-change ${yoyClass(item.eps_yoy)}">${yoyArrow(item.eps_yoy)} ${fmtPct(item.eps_yoy)}</div>
+        </div>
+      </div>
+      <div class="metrics-row">
+        <div>
+          <div class="metric-label">ROE</div>
+          <div class="metric-value">${fmtPct(item.roe)}</div>
+        </div>
+        <div>
+          <div class="metric-label">淨利率</div>
+          <div class="metric-value">${fmtPct(item.net_margin)}</div>
+        </div>
+        <div>
+          <div class="metric-label">負債比</div>
+          <div class="metric-value">${fmtPct(item.debt_ratio, 0)}</div>
+        </div>
+      </div>
+      ${item.warnings > 0 ? `<div class="warn-badge">⚠️ ${item.warnings} 項數據警示</div>` : ""}
+      ${alertHtml}
+    </div>`;
+}
+
+function renderList() {
+  renderChips();
+  const filtered = currentFilter === "全部" ? allItems : allItems.filter(i => (i.category || "觀察中") === currentFilter);
+  if (filtered.length === 0) {
+    contentEl.innerHTML = `<div class="empty-state">這個分類目前沒有股票</div>`;
+    return;
+  }
+  contentEl.innerHTML = `<div class="watch-grid">${filtered.map(renderCard).join("")}</div>`;
+
+  document.querySelectorAll(".watch-card").forEach(card => {
+    card.addEventListener("click", (e) => {
+      if (e.target.closest("[data-remove]")) return;
+      window.location.href = `stock.html?code=${card.dataset.code}`;
+    });
+  });
+  document.querySelectorAll("[data-remove]").forEach(btn => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const code = btn.dataset.remove;
+      if (!confirm(`確定要從觀察清單移除 ${code} 嗎？`)) return;
+      await apiDelete(`/api/watchlist/${code}`);
+      loadWatchlist();
+    });
+  });
+}
+
+async function loadWatchlist() {
+  try {
+    allItems = await apiGet("/api/watchlist");
+    countEl.textContent = `${allItems.length} 檔追蹤中`;
+    if (allItems.length === 0) {
+      document.getElementById("filterChips").innerHTML = "";
+      contentEl.innerHTML = `<div class="empty-state">還沒有追蹤任何股票 — 在上方輸入股票代碼開始吧！<br>例如：2330（台積電）、2317（鴻海）、2454（聯發科）</div>`;
+      return;
+    }
+    renderList();
+  } catch (err) {
+    contentEl.innerHTML = `<div class="empty-state">載入失敗：${err.message}</div>`;
+  }
+}
+
+document.getElementById("addForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const form = e.target;
+  const code = form.code.value.trim();
+  const note = form.note.value.trim();
+  const category = document.getElementById("categorySelect").value;
+  const alertBelowRaw = form.alert_below.value;
+  const alertAboveRaw = form.alert_above.value;
+  const errEl = document.getElementById("addError");
+  errEl.textContent = "";
+  try {
+    await apiPost("/api/watchlist", {
+      code, note, category,
+      alert_below: alertBelowRaw ? parseFloat(alertBelowRaw) : null,
+      alert_above: alertAboveRaw ? parseFloat(alertAboveRaw) : null,
+    });
+    form.reset();
+    contentEl.innerHTML = `<div class="loading">正在抓取 ${code} 的財報資料，第一次抓取需要幾秒鐘…</div>`;
+    loadWatchlist();
+  } catch (err) {
+    errEl.textContent = err.message;
+  }
+});
+
+loadSentiment();
+loadWatchlist();
+</script>
+</body>
+</html>

@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>市場行事曆</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="header">
+  <div>
+    <h1>🗓️ 市場行事曆</h1>
+    <div class="subtitle">自選股除權息 / 財報截止日 + 總體經濟事件</div>
+  </div>
+  <div class="nav">
+    <a href="index.html">🏠 總覽</a>
+    <a href="calendar.html" class="active">🗓️ 市場行事曆</a>
+  </div>
+</div>
+
+<div class="container">
+
+  <div class="filter-chips">
+    <div class="chip active" data-type="all">全部</div>
+    <div class="chip" data-type="dividend">💰 除權息</div>
+    <div class="chip" data-type="report">📊 財報截止日</div>
+    <div class="chip" data-type="macro">🌐 總體經濟</div>
+  </div>
+
+  <div id="content">
+    <div class="loading">載入中…</div>
+  </div>
+
+  <div class="footer-note">
+    除權息資料來源：證交所 OpenAPI（僅提供當月預告）。財報截止日為法規規定的最晚公告期限，實際公告日通常更早。<br>
+    總體經濟事件（央行會議、CPI 等）確切日期請點擊項目上的官方連結確認，這部分資料存在 <code>backend/data/macro_events.json</code>，你可以自行編輯增加。
+  </div>
+</div>
+
+<script src="common.js"></script>
+<script>
+const contentEl = document.getElementById("content");
+let currentType = "all";
+let events = [];
+
+function typeLabel(t) {
+  return { dividend: "除權息", report: "財報截止日", macro: "總經事件" }[t] || t;
+}
+function typeClass(t) {
+  return { dividend: "dividend", report: "report", macro: "macro" }[t] || "";
+}
+
+function renderItem(ev) {
+  return `
+    <div class="calendar-item">
+      <div class="cal-date">${ev.date || "日期未定"}</div>
+      <div class="cal-body">
+        <div class="cal-title">${ev.title}</div>
+        <div class="cal-detail">${ev.detail || ""}</div>
+      </div>
+      <span class="cal-type ${typeClass(ev.type)}">${typeLabel(ev.type)}</span>
+    </div>`;
+}
+
+function render() {
+  const filtered = currentType === "all" ? events : events.filter(e => e.type === currentType);
+  if (filtered.length === 0) {
+    contentEl.innerHTML = `<div class="empty-state">目前沒有這個類別的事件</div>`;
+    return;
+  }
+  contentEl.innerHTML = `<div class="calendar-list">${filtered.map(renderItem).join("")}</div>`;
+}
+
+async function load() {
+  try {
+    const data = await apiGet("/api/calendar");
+    events = [];
+
+    (data.dividend_events || []).forEach(e => events.push({
+      type: "dividend",
+      date: e.date,
+      title: `${e.stock_name || e.stock_id} (${e.stock_id}) 除權息`,
+      detail: e.detail,
+    }));
+
+    (data.report_deadlines || []).forEach(e => events.push({
+      type: "report",
+      date: e.date,
+      title: `${e.stock_id} ${e.detail}`,
+      detail: "法定最晚公告日，實際公告通常更早",
+    }));
+
+    (data.macro_events || []).forEach(e => events.push({
+      type: "macro",
+      date: e.date || e.recurrence,
+      title: e.title,
+      detail: e.detail + (e.source_url ? ` ｜ 官方資訊：${e.source_url}` : ""),
+    }));
+
+    events.sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+
+    if (data.dividend_error) {
+      contentEl.innerHTML = `<div class="empty-state" style="padding:12px; text-align:left;">⚠️ 除權息資料暫時抓取失敗：${data.dividend_error}</div>`;
+    }
+    render();
+  } catch (err) {
+    contentEl.innerHTML = `<div class="empty-state">載入失敗：${err.message}</div>`;
+  }
+}
+
+document.querySelectorAll("[data-type]").forEach(chip => {
+  chip.addEventListener("click", () => {
+    document.querySelectorAll("[data-type]").forEach(c => c.classList.remove("active"));
+    chip.classList.add("active");
+    currentType = chip.dataset.type;
+    render();
+  });
+});
+
+load();
+</script>
+</body>
+</html>
